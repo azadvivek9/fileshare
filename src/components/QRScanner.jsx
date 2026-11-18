@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
 
-export function QRScanner({ onScan, isConnecting = false }) {
+export function QRScanner({ onScan, onClose }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
@@ -10,17 +10,14 @@ export function QRScanner({ onScan, isConnecting = false }) {
 
   const [cameraError, setCameraError] = useState('');
   const [isScanning, setIsScanning] = useState(false);
-  const [detectedToast, setDetectedToast] = useState('');
 
-  // Start Camera
   useEffect(() => {
     let active = true;
 
     async function startCamera() {
-      // Check if mediaDevices is supported (requires HTTPS or localhost)
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setCameraError(
-          'Live camera requires HTTPS or localhost. Enter the 6-digit code or upload a QR image below.'
+          'Live camera requires HTTPS or localhost. You can upload a QR image below.'
         );
         return;
       }
@@ -28,21 +25,23 @@ export function QRScanner({ onScan, isConnecting = false }) {
       let stream = null;
 
       try {
-        // Try ideal back camera for mobile devices
+        // Ideal back camera for mobile
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } }
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
         });
       } catch {
-        // Fallback to any available camera (laptop webcam, front cam)
         try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: true
-          });
-        } catch (err2) {
-          console.warn('Camera access denied or unavailable:', err2);
+          // Fallback to any camera (laptop webcam, front cam)
+          stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        } catch (err) {
+          console.warn('Camera access error:', err);
           if (active) {
             setCameraError(
-              'Camera access was denied or unavailable. Enter code or upload image below.'
+              'Camera permission was denied or camera is unavailable. You can upload a QR image below.'
             );
           }
           return;
@@ -65,8 +64,10 @@ export function QRScanner({ onScan, isConnecting = false }) {
 
         try {
           await video.play();
-          setIsScanning(true);
-          requestScanFrame();
+          if (active) {
+            setIsScanning(true);
+            requestScanFrame();
+          }
         } catch (playErr) {
           console.warn('Video play error:', playErr);
         }
@@ -79,9 +80,10 @@ export function QRScanner({ onScan, isConnecting = false }) {
       active = false;
       if (animFrameRef.current) {
         cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
       }
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
     };
@@ -128,22 +130,23 @@ export function QRScanner({ onScan, isConnecting = false }) {
   };
 
   const handleCodeFound = (sixDigitCode) => {
+    // 1. Immediately stop camera stream
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
     }
-    setIsScanning(false);
-    setDetectedToast(`Found code: ${sixDigitCode}`);
-    if (navigator.vibrate) {
-      try { navigator.vibrate(50); } catch {}
-    }
+
+    // 2. Haptic feedback if available
+    try { navigator.vibrate?.(50); } catch {}
+
+    // 3. Immediately trigger connection
     onScan(sixDigitCode);
   };
 
-  // Upload QR Image from gallery / file
   const handleImageUpload = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -171,9 +174,9 @@ export function QRScanner({ onScan, isConnecting = false }) {
               return;
             }
           }
-          alert('No 6-digit QR code found in this image. Please enter code manually.');
+          alert('No 6-digit QR code found in this image. Please try another image.');
         } catch {
-          alert('Could not decode QR from image. Please enter code manually.');
+          alert('Could not decode QR from image.');
         }
       };
       img.src = event.target.result;
@@ -182,8 +185,20 @@ export function QRScanner({ onScan, isConnecting = false }) {
     e.target.value = '';
   };
 
+  const handleClose = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+    onClose();
+  };
+
   return (
-    <div className="scanner-container">
+    <div className="fullscreen-scanner">
       {/* Hidden canvas for image decoding */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
@@ -196,63 +211,78 @@ export function QRScanner({ onScan, isConnecting = false }) {
         onChange={handleImageUpload}
       />
 
-      {/* Success detection toast */}
-      {detectedToast && (
-        <div className="code-detected-toast">
-          ✓ {detectedToast}
-        </div>
-      )}
-
-      {/* Camera Viewfinder */}
+      {/* Fullscreen Camera Video */}
       {!cameraError ? (
-        <div className="scanner-viewport">
-          <video
-            ref={videoRef}
-            className="scanner-video"
-            autoPlay
-            playsInline
-            muted
-          />
-          <div className="scanner-overlay">
-            <div className={`scanner-frame ${isScanning ? 'active' : ''}`}>
-              <span className="corner top-left" />
-              <span className="corner top-right" />
-              <span className="corner bottom-left" />
-              <span className="corner bottom-right" />
-              {isScanning && <div className="scanner-laser" />}
-            </div>
-          </div>
-        </div>
+        <video
+          ref={videoRef}
+          className="scanner-fullscreen-video"
+          autoPlay
+          playsInline
+          muted
+        />
       ) : (
-        <div className="scanner-fallback-msg">
+        <div className="scanner-fullscreen-error">
           <svg
-            width="28"
-            height="28"
+            width="36"
+            height="36"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
             strokeWidth="1.75"
-            style={{ margin: '0 auto 8px', color: '#6b7280' }}
+            style={{ marginBottom: 12, color: '#f87171' }}
           >
             <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
           </svg>
-          <span>{cameraError}</span>
+          <p>{cameraError}</p>
         </div>
       )}
 
-      {/* Action to scan from image / screenshot */}
-      <button
-        type="button"
-        className="btn-upload-qr"
-        onClick={() => fileInputRef.current && fileInputRef.current.click()}
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-          <circle cx="8.5" cy="8.5" r="1.5" />
-          <polyline points="21 15 16 10 5 21" />
-        </svg>
-        <span>Upload QR image / screenshot</span>
-      </button>
+      {/* Top Navigation Bar */}
+      <div className="scanner-fullscreen-header">
+        <button
+          type="button"
+          className="btn-scanner-back"
+          onClick={handleClose}
+          aria-label="Close scanner"
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+          </svg>
+        </button>
+        <span className="scanner-header-title">Scan QR Code</span>
+        <div style={{ width: 40 }} />
+      </div>
+
+      {/* Center QR Cutout Frame */}
+      <div className="scanner-fullscreen-reticle-wrap">
+        <div className={`scanner-fullscreen-reticle ${isScanning ? 'active' : ''}`}>
+          <span className="corner top-left" />
+          <span className="corner top-right" />
+          <span className="corner bottom-left" />
+          <span className="corner bottom-right" />
+          {isScanning && <div className="scanner-laser" />}
+        </div>
+      </div>
+
+      {/* Bottom Controls */}
+      <div className="scanner-fullscreen-footer">
+        <p className="scanner-instruction-text">
+          Align QR code within the frame to scan
+        </p>
+
+        <button
+          type="button"
+          className="btn-fullscreen-upload"
+          onClick={() => fileInputRef.current && fileInputRef.current.click()}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <polyline points="21 15 16 10 5 21" />
+          </svg>
+          <span>Upload from Gallery</span>
+        </button>
+      </div>
     </div>
   );
 }

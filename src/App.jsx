@@ -90,16 +90,15 @@ function FilePreview({ item, mode = 'list' }) {
 }
 
 export default function App() {
-  // Views: 'home' (first screen with tab switcher) | 'connected'
+  // Views: 'home' | 'connected'
   const [view, setView] = useState('home');
-  const [activeTab, setActiveTab] = useState('my-qr'); // 'my-qr' | 'scan'
   const [roomId, setRoomId] = useState('');
-  const [qrExpiresIn, setQrExpiresIn] = useState(60);
   const [connectionStatus, setConnectionStatus] = useState('disconnected'); // 'disconnected' | 'connecting' | 'connected' | 'peer-left'
   const [errorMsg, setErrorMsg] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
   const [manualJoinCode, setManualJoinCode] = useState('');
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
 
   // File view mode: 'list' | 'grid' (persisted in localStorage)
   const [viewMode, setViewMode] = useState(() => {
@@ -118,24 +117,26 @@ export default function App() {
 
   const webrtcRef = useRef(null);
   const fileInputRef = useRef(null);
+  const hasReloadedRef = useRef(false);
 
-  // Clean up and reset session back to Home screen
-  const handlePeerDisconnected = useCallback((msg = '') => {
+  // Clean up and automatically reload page on peer disconnect (guarded against duplicate triggers)
+  const handlePeerDisconnected = useCallback(() => {
+    if (hasReloadedRef.current) return;
+    hasReloadedRef.current = true;
+
     if (webrtcRef.current) {
-      webrtcRef.current.cleanupPeer();
-      webrtcRef.current.disconnect();
+      try { webrtcRef.current.cleanupPeer(); } catch {}
+      try { webrtcRef.current.disconnect(); } catch {}
       webrtcRef.current = null;
     }
-    setConnectionStatus('disconnected');
-    setView('home');
-    setActiveTab('my-qr');
-    setTransfers([]);
-    setSharedText('');
-    lastSentTextRef.current = '';
-    lastReceivedTextRef.current = '';
-    if (msg) setErrorMsg(msg);
-    // Immediately create a fresh room for the new session
-    handleAutoCreateRoom();
+
+    // Clean URL so the page reloads fresh
+    if (window.location.pathname.startsWith('/join/') || window.location.search.includes('room=')) {
+      window.history.replaceState({}, document.title, '/');
+    }
+
+    // Single guarded auto-reload
+    window.location.reload();
   }, []);
 
   // Initialize WebRTC instance
@@ -145,16 +146,15 @@ export default function App() {
         onStateChange: (state, meta) => {
           if (state === 'created' || state === 'joined') {
             setRoomId(meta.roomId);
-            setQrExpiresIn(60);
           } else if (state === 'connecting') {
             setConnectionStatus('connecting');
           } else if (state === 'connected') {
             setConnectionStatus('connected');
             setView('connected');
+            setIsScannerOpen(false);
             setErrorMsg('');
           } else if (state === 'peer-left' || state === 'disconnected' || state === 'failed') {
-            // Immediately clean up and return to the first home screen
-            handlePeerDisconnected(state === 'peer-left' ? 'Peer disconnected' : '');
+            handlePeerDisconnected();
           }
         },
         onTextMessage: (item) => {
@@ -196,36 +196,12 @@ export default function App() {
     }
   }, []);
 
-  // QR Code 60-Second Auto-Regeneration Timer
-  // Runs ONLY when on home screen and waiting for connection
-  useEffect(() => {
-    if (view !== 'home' || connectionStatus !== 'disconnected') {
-      return;
-    }
-
-    const timer = setInterval(() => {
-      setQrExpiresIn((prev) => {
-        if (prev <= 1) {
-          // Time expired: auto-regenerate fresh room code and QR
-          if (webrtcRef.current && connectionStatus === 'disconnected') {
-            webrtcRef.current.createRoom();
-          }
-          return 60;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [view, connectionStatus]);
-
   const handleAutoCreateRoom = async () => {
     setErrorMsg('');
     const client = getWebRTC();
     try {
       await client.connectSignaling(getWebSocketUrl());
       client.createRoom();
-      setQrExpiresIn(60);
     } catch {
       setErrorMsg('Unable to connect to signaling server');
     }
@@ -238,25 +214,21 @@ export default function App() {
       return;
     }
     setErrorMsg('');
+    setIsScannerOpen(false);
+    setConnectionStatus('connecting');
+
     const client = getWebRTC();
     try {
       await client.connectSignaling(getWebSocketUrl());
       client.joinRoom(code);
-      setConnectionStatus('connecting');
     } catch {
       setErrorMsg('Unable to connect to signaling server');
+      setConnectionStatus('disconnected');
     }
   };
 
   const handleDisconnect = () => {
     handlePeerDisconnected();
-  };
-
-  const handleManualRefreshQR = () => {
-    if (webrtcRef.current && connectionStatus === 'disconnected') {
-      webrtcRef.current.createRoom();
-      setQrExpiresIn(60);
-    }
   };
 
   // --- Live Debounced Text Sync ---
@@ -370,98 +342,68 @@ export default function App() {
         </div>
       )}
 
-      {/* 1. FIRST / HOME SCREEN: WHATSAPP-STYLE TWO-TAB SWITCHER */}
+      {/* 1. FIRST / HOME SCREEN */}
       {view === 'home' && (
         <section className="home-container">
           {/* Top Tab Bar */}
           <nav className="tab-bar">
             <button
               type="button"
-              className={`tab-btn ${activeTab === 'my-qr' ? 'active' : ''}`}
-              onClick={() => setActiveTab('my-qr')}
+              className="tab-btn active"
             >
               My QR Code
             </button>
             <button
               type="button"
-              className={`tab-btn ${activeTab === 'scan' ? 'active' : ''}`}
-              onClick={() => setActiveTab('scan')}
+              className="tab-btn"
+              onClick={() => setIsScannerOpen(true)}
             >
               Scan Code
             </button>
           </nav>
 
-          {/* TAB A: MY QR CODE */}
-          {activeTab === 'my-qr' && (
-            <div className="tab-content my-qr-tab">
-              {/* 6-Digit Code */}
-              <div className="code-display-group">
-                <span className="code-label">SESSION CODE</span>
-                <div
-                  className="code-digits"
-                  onClick={copyRoomCode}
-                  title="Click to copy code"
-                >
-                  {roomId || '------'}
-                </div>
-                {copiedCode && (
-                  <span className="code-copied-toast">Code copied!</span>
-                )}
+          {/* MY QR CODE TAB CONTENT (Permanent, Indefinite Session) */}
+          <div className="tab-content my-qr-tab">
+            {/* 6-Digit Code */}
+            <div className="code-display-group">
+              <span className="code-label">SESSION CODE</span>
+              <div
+                className="code-digits"
+                onClick={copyRoomCode}
+                title="Click to copy code"
+              >
+                {roomId || '------'}
               </div>
-
-              {/* QR Code Container */}
-              <div className="qr-box">
-                {roomId ? (
-                  <QRCodeCanvas
-                    text={`${window.location.origin}/join/${roomId}`}
-                    size={200}
-                  />
-                ) : (
-                  <div className="qr-placeholder" />
-                )}
-              </div>
-
-              {/* 60-Second Refresh Indicator */}
-              <div className="qr-timer-row">
-                <span className="qr-timer-text">
-                  New code in {qrExpiresIn}s
-                </span>
-                <button
-                  type="button"
-                  className="btn-refresh-qr"
-                  onClick={handleManualRefreshQR}
-                  title="Generate a fresh QR now"
-                >
-                  Refresh now
-                </button>
-              </div>
-
-              {connectionStatus === 'connecting' && (
-                <div className="status-pill status-connecting">
-                  <span className="dot pulse" />
-                  <span>Connecting to peer...</span>
-                </div>
+              {copiedCode && (
+                <span className="code-copied-toast">Code copied!</span>
               )}
             </div>
-          )}
 
-          {/* TAB B: SCAN CODE */}
-          {activeTab === 'scan' && (
-            <div className="tab-content scan-tab">
-              <QRScanner
-                onScan={(code) => handleJoinRoom(code)}
-                isConnecting={connectionStatus === 'connecting'}
-              />
-              {connectionStatus === 'connecting' && (
-                <div className="status-pill status-connecting" style={{ marginTop: 12 }}>
-                  <span className="dot pulse" />
-                  <span>Connecting to peer session...</span>
-                </div>
+            {/* QR Code Container */}
+            <div className="qr-box">
+              {roomId ? (
+                <QRCodeCanvas
+                  text={`${window.location.origin}/join/${roomId}`}
+                  size={200}
+                />
+              ) : (
+                <div className="qr-placeholder" />
               )}
             </div>
-          )}
 
-          {/* JOIN WITH CODE SECTION (DIRECTLY ON FIRST SCREEN) */}
+            <p className="qr-subtext">
+              Scan with another device camera or enter code below
+            </p>
+
+            {connectionStatus === 'connecting' && (
+              <div className="status-pill status-connecting">
+                <span className="dot pulse" />
+                <span>Connecting to peer...</span>
+              </div>
+            )}
+          </div>
+
+          {/* JOIN WITH 6-DIGIT CODE SECTION */}
           <div className="home-manual-join">
             <span className="scanner-manual-label">OR ENTER 6-DIGIT CODE TO JOIN</span>
             <form
@@ -491,6 +433,14 @@ export default function App() {
             </form>
           </div>
         </section>
+      )}
+
+      {/* FULL-SCREEN SCANNER VIEW */}
+      {isScannerOpen && (
+        <QRScanner
+          onScan={(code) => handleJoinRoom(code)}
+          onClose={() => setIsScannerOpen(false)}
+        />
       )}
 
       {/* 2. CONNECTED / TRANSFER SCREEN */}

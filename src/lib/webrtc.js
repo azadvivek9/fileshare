@@ -44,6 +44,7 @@ export class WebRTCConnection {
     this.sendQueue = [];
     this.isSending = false;
     this.transfers = new Map(); // id -> transfer status object
+    this.pendingCandidates = [];
 
     this.speedInterval = null;
   }
@@ -199,6 +200,12 @@ export class WebRTCConnection {
     if (data.type === 'offer') {
       await this.initPeerConnection(false);
       await this.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      if (this.pendingCandidates && this.pendingCandidates.length > 0) {
+        for (const candidate of this.pendingCandidates) {
+          try { await this.pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+        }
+        this.pendingCandidates = [];
+      }
       const answer = await this.pc.createAnswer();
       await this.pc.setLocalDescription(answer);
       this.sendSignaling({
@@ -208,14 +215,21 @@ export class WebRTCConnection {
     } else if (data.type === 'answer') {
       if (this.pc && this.pc.signalingState !== 'closed') {
         await this.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        if (this.pendingCandidates && this.pendingCandidates.length > 0) {
+          for (const candidate of this.pendingCandidates) {
+            try { await this.pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+          }
+          this.pendingCandidates = [];
+        }
       }
     } else if (data.type === 'candidate') {
-      if (this.pc && data.candidate) {
+      if (this.pc && this.pc.remoteDescription && this.pc.remoteDescription.type) {
         try {
           await this.pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch {
-          // Candidate might arrive before remote description is set
-        }
+        } catch {}
+      } else {
+        if (!this.pendingCandidates) this.pendingCandidates = [];
+        this.pendingCandidates.push(data.candidate);
       }
     }
   }
@@ -605,6 +619,7 @@ export class WebRTCConnection {
   }
 
   cleanupPeer() {
+    this.pendingCandidates = [];
     if (this.controlChannel) {
       try { this.controlChannel.close(); } catch {}
       this.controlChannel = null;
