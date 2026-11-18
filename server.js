@@ -92,6 +92,13 @@ wss.on('connection', (ws) => {
 
       switch (msg.type) {
         case 'create-room': {
+          if (currentRoom && rooms.has(currentRoom)) {
+            const oldRoom = rooms.get(currentRoom);
+            oldRoom.peers.delete(ws);
+            if (oldRoom.peers.size === 0) {
+              rooms.delete(currentRoom);
+            }
+          }
           const roomId = generateRoomId();
           currentRoom = roomId;
           rooms.set(roomId, {
@@ -114,6 +121,15 @@ wss.on('connection', (ws) => {
           if (room.peers.size >= 2) {
             sendJson(ws, { type: 'error', message: 'Room is already full' });
             return;
+          }
+
+          // Leave previous auto-created room if joining another room
+          if (currentRoom && currentRoom !== roomId && rooms.has(currentRoom)) {
+            const oldRoom = rooms.get(currentRoom);
+            oldRoom.peers.delete(ws);
+            if (oldRoom.peers.size === 0) {
+              rooms.delete(currentRoom);
+            }
           }
 
           currentRoom = roomId;

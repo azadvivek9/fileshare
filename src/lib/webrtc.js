@@ -52,6 +52,19 @@ export class WebRTCConnection {
    * Connect to WebSocket signaling server
    */
   connectSignaling(url) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+    if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
+      return new Promise((resolve) => {
+        const onOpen = () => {
+          this.ws.removeEventListener('open', onOpen);
+          resolve();
+        };
+        this.ws.addEventListener('open', onOpen);
+      });
+    }
+
     return new Promise((resolve, reject) => {
       try {
         this.ws = new WebSocket(url);
@@ -293,10 +306,12 @@ export class WebRTCConnection {
           id: msg.id,
           name: msg.name,
           size: msg.size,
+          mimeType: msg.mimeType,
           progress: 0,
           speed: 0,
           status: 'receiving',
-          direction: 'download'
+          direction: 'download',
+          timestamp: Date.now()
         });
         break;
 
@@ -305,15 +320,21 @@ export class WebRTCConnection {
           const { chunks, mimeType, name, id, size } = this.activeReceiving;
           const blob = new Blob(chunks, { type: mimeType || 'application/octet-stream' });
           const url = URL.createObjectURL(blob);
+          const previewUrl =
+            mimeType?.startsWith('image/') || mimeType === 'application/pdf'
+              ? url
+              : null;
 
           this.updateTransfer(id, {
             id,
             name,
             size,
+            mimeType,
             progress: 100,
             speed: 0,
             status: 'completed',
             blobUrl: url,
+            previewUrl,
             direction: 'download'
           });
           this.activeReceiving = null;
@@ -357,6 +378,11 @@ export class WebRTCConnection {
   enqueueFiles(files) {
     for (const file of files) {
       const id = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const previewUrl =
+        file.type.startsWith('image/') || file.type === 'application/pdf'
+          ? URL.createObjectURL(file)
+          : null;
+
       const transferItem = {
         id,
         name: file.name,
@@ -365,13 +391,16 @@ export class WebRTCConnection {
         progress: 0,
         speed: 0,
         status: 'queued',
-        direction: 'upload'
+        direction: 'upload',
+        timestamp: Date.now(),
+        previewUrl
       };
 
       this.transfers.set(id, transferItem);
       this.sendQueue.push({ id, file });
-      this.onTransferUpdate(Array.from(this.transfers.values()));
     }
+
+    this.emitTransfers();
 
     if (!this.isSending) {
       this.processSendQueue();
@@ -548,7 +577,7 @@ export class WebRTCConnection {
       }
 
       if (changed) {
-        this.onTransferUpdate(Array.from(this.transfers.values()));
+        this.emitTransfers();
       }
     }, 250); // 4Hz throttled UI update
   }
@@ -560,11 +589,19 @@ export class WebRTCConnection {
     }
   }
 
+  emitTransfers() {
+    // Sort transfers with the most recently added file at the TOP (timestamp descending)
+    const list = Array.from(this.transfers.values()).sort(
+      (a, b) => (b.timestamp || 0) - (a.timestamp || 0)
+    );
+    this.onTransferUpdate(list);
+  }
+
   updateTransfer(id, updates) {
     const existing = this.transfers.get(id) || {};
     const updated = { ...existing, ...updates };
     this.transfers.set(id, updated);
-    this.onTransferUpdate(Array.from(this.transfers.values()));
+    this.emitTransfers();
   }
 
   cleanupPeer() {
